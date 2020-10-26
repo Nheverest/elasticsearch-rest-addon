@@ -29,7 +29,7 @@ class ElasticSearchModule extends PrivateModule {
         if (elasticSearchClientWrappers != null && !elasticSearchClientWrappers.isEmpty()) {
             for (Entry<String, RestHighLevelClient> entry : elasticSearchClientWrappers.entrySet()) {
                 Key<RestHighLevelClient> clientKey = Key.get(RestHighLevelClient.class, Names.named(entry.getKey()));
-                bind(clientKey).toInstance(ElasticSearchClientProxy.create(RestHighLevelClient.class, entry.getValue()));
+                bind(clientKey).toInstance(entry.getValue());
                 expose(clientKey);
             }
         }

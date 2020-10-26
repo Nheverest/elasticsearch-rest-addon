@@ -9,16 +9,23 @@ package org.seedstack.elasticsearch.internal;
 
 import io.nuun.kernel.api.plugin.InitState;
 import io.nuun.kernel.api.plugin.context.InitContext;
+import javassist.util.proxy.MethodFilter;
+import javassist.util.proxy.Proxy;
+import javassist.util.proxy.ProxyFactory;
 import org.apache.http.HttpHost;
 import org.elasticsearch.client.RestClient;
+import org.elasticsearch.client.RestClientBuilder;
 import org.elasticsearch.client.RestHighLevelClient;
 import org.elasticsearch.common.settings.Settings;
 import org.seedstack.elasticsearch.ElasticSearchConfig;
 import org.seedstack.seed.SeedException;
 import org.seedstack.seed.core.internal.AbstractSeedPlugin;
+import org.seedstack.seed.core.internal.CoreErrorCode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -29,7 +36,7 @@ import java.util.Map.Entry;
  * This plugin manages clients used to access ElasticSearch instances.
  */
 public class ElasticSearchPlugin extends AbstractSeedPlugin {
-    private static final int DEFAULT_ELASTIC_SEARCH_PORT = 9300;
+    private static final int DEFAULT_ELASTIC_SEARCH_PORT = 9200;
     private static final Logger LOGGER = LoggerFactory.getLogger(ElasticSearchPlugin.class);
     private final Map<String, RestHighLevelClient> elasticSearchClients = new HashMap<>();
 
@@ -68,6 +75,7 @@ public class ElasticSearchPlugin extends AbstractSeedPlugin {
         for (Entry<String, RestHighLevelClient> entry : elasticSearchClients.entrySet()) {
             LOGGER.info("Closing ElasticSearch client {}", entry.getKey());
             try {
+                ((Proxy) entry.getValue()).setHandler(new DefaultHandler());
                 entry.getValue().close();
             } catch (Exception e) {
                 LOGGER.error(String.format("Unable to properly close ElasticSearch client %s", entry.getKey()), e);
@@ -77,10 +85,36 @@ public class ElasticSearchPlugin extends AbstractSeedPlugin {
 
     private RestHighLevelClient buildRestClient(String clientName, ElasticSearchConfig.ClientConfig clientConfig) {
         Settings.Builder settingsBuilder = Settings.builder();
-        if ( clientConfig.getProperties() != null ) {
+        if (clientConfig.getProperties() != null) {
             clientConfig.getProperties().forEach((key, value) -> settingsBuilder.put((String) key, (String) value));
         }
+        List<HttpHost> hosts = buildHosts(clientName, clientConfig);
+        RestHighLevelClient restClient = null;
+        try {
+            ProxyFactory factory = new ProxyFactory();
+            factory.setSuperclass(RestHighLevelClient.class);
+            factory.setFilter(new MethodFilter() {
+                @Override
+                public boolean isHandled(Method m) {
+                    return !m.getName().equals("finalize");
+                }
+            });
+
+            Class[] parameterTypes = {RestClientBuilder.class};
+            RestClientBuilder builder = RestClient.builder(hosts.toArray(new HttpHost[hosts.size()]));
+            Object[] parameters = {builder};
+
+            restClient = (RestHighLevelClient) factory.create(parameterTypes, parameters, new NoCloseHandler());
+        } catch (NoSuchMethodException | IllegalArgumentException |
+                InstantiationException | IllegalAccessException | InvocationTargetException e) {
+            throw SeedException.wrap(e, CoreErrorCode.UNABLE_TO_CREATE_PROXY).put("class", RestHighLevelClient.class.getName());
+        }
+        return restClient;
+    }
+
+    private List<HttpHost> buildHosts(String clientName, ElasticSearchConfig.ClientConfig clientConfig) {
         List<HttpHost> hosts = new ArrayList<>();
+
         for (String host : clientConfig.getHosts()) {
             String[] hostInfo = host.split(":");
             if (hostInfo.length > 2) {
@@ -102,7 +136,6 @@ public class ElasticSearchPlugin extends AbstractSeedPlugin {
             }
             hosts.add(new HttpHost(address, port, "http"));
         }
-        RestHighLevelClient restClient = new RestHighLevelClient(RestClient.builder(hosts.toArray(new HttpHost[hosts.size()])));
-        return restClient;
+        return hosts;
     }
 }
